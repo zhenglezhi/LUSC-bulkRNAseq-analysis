@@ -1,0 +1,1047 @@
+# Check working directory
+```{r}
+getwd()
+```
+
+
+```{r}
+# Load required packages
+library(edgeR)
+library(ggplot2)
+library(gplots)
+library(dplyr)
+library(tidyr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(DOSE)
+library(enrichplot)
+library(ReactomePA)
+library(pathview)
+library(tidyverse)
+library(RColorBrewer)
+library(ggrepel)
+library(pheatmap)
+
+```
+
+
+```{r}
+# Load raw count data
+counts <- read.csv("~/Downloads/GSE268175_RAW/GSE268175_RAW_merged.csv")
+head(counts)
+dim(counts)
+
+colnames(counts[, 2:34])
+colnames(counts[,35:67])
+
+
+```
+```{r}
+remove <- c("LC.016C", "LC.040C", "LC.043C", "LC.031N", "LC.041N")
+counts_paired <- counts[,!colnames(counts) %in% remove]
+
+dim(counts_paired)
+
+colnames(counts_paired)
+
+```
+
+
+
+```{r}
+# Clean gene ID (remove version numbers .xx)
+counts_paired$gene_id <- gsub("\\..*", "", counts_paired$gene_id)
+```
+
+
+```{r}
+# Collapse duplicate gene IDs by summing counts
+counts_cleaned <- counts_paired %>%
+  group_by(gene_id) %>%
+  summarise(across(where(is.numeric), sum)) %>%
+  as.data.frame()
+```
+
+#filter out low counts
+```{r}
+
+head(counts_cleaned)
+
+samples <- counts_cleaned[, -1]
+
+keep <- rowSums(edgeR::cpm(samples)>1) >= 3
+
+counts_filtered <- counts_cleaned[keep,]
+
+head(counts_filtered)
+
+dim(counts_filtered)
+dim(counts_cleaned)
+
+```
+
+#change sample name
+```{r}
+colnames(counts_filtered)
+
+#normal samples
+for (i in 2:32) {
+  colnames(counts_filtered)[i] <- paste("N", i-1, sep = "")
+}
+
+#cancer samples
+for(i in 33:63){
+  colnames(counts_filtered)[i] <- paste("C", i-32, sep = "")
+}
+colnames(counts_filtered)
+```
+```{r}
+remove_2 <- c("C5", "C22", "N5", "N22", "C4", "N4")
+counts_filtered <- counts_filtered[,!colnames(counts_filtered) %in% remove_2]
+
+counts_filtered
+
+```
+
+
+```{r}
+# Load annotation
+annot <- read.csv("~/Desktop/RNAseq Data Analysis Training/annotation.csv")
+dim(annot)
+head(annot)
+```
+
+
+```{r}
+# Filter annotations to genes present in counts
+genesList <- subset(annot, gene_id %in% counts_filtered$gene_id)
+print(dim(genesList))
+print(dim(counts_filtered))
+
+head(genesList)
+```
+
+
+```{r}
+# rename annotation columns
+colnames(genesList)
+colnames(genesList)[1:5] <- c("gene_id", "gene_name", "chr", "gene_biotype", "description")
+
+head(genesList)
+
+```
+
+
+```{r}
+# Remove brackets from description
+genesList$description <- gsub("\\[.*", "", genesList$description)
+```
+
+```{r}
+genesList
+
+genes_filtered <- genesList %>%
+  filter(
+    !grepl("pseudogene|TEC", gene_biotype, ignore.case = TRUE),
+    !grepl("pseudogene|novel|TEC|NULL|ribosomal|uncharacterized|7SK", description, ignore.case = TRUE)
+  )
+
+dim(genes_filtered)
+dim(genesList)
+
+
+unique(genes_filtered$gene_biotype)
+unique(genesList$description)
+```
+```{r}
+dim(counts_filtered)
+
+dim(genes_filtered)
+length(unique(genes_filtered$gene_name))
+```
+
+
+
+```{r}
+merged_df <- merge(genes_filtered, counts_filtered, by = "gene_id")
+
+head(merged_df)
+
+df <- merged_df %>%
+  dplyr::select(gene_id, gene_name, description, colnames(counts_filtered))
+
+head(df)
+
+#checks genes that appear > 1
+table(merged_df$gene_name)[table(merged_df$gene_name) >1 ]
+```
+
+
+
+
+
+```{r}
+# Collapse by gene name and sum counts
+df_collapsed <- df %>%
+  dplyr::group_by(gene_name) %>%  
+  dplyr::summarise(
+    gene_id =  dplyr::first(gene_id),
+    gene_name = dplyr::first(gene_name),
+    description = dplyr::first(description),
+    across(where(is.numeric), sum)) %>%
+  as.data.frame()
+
+# Set gene name as rownames
+head(df_collapsed)
+
+dim(df_collapsed)
+dim(df)
+
+length(unique(df_collapsed$gene_name))
+
+write.csv(df_collapsed, file = "GSE268175_unique_annot.csv")
+```
+```{r}
+rownames(df_collapsed) <- df_collapsed$gene_name
+
+sample_data <- df_collapsed[, 4:length(colnames(df_collapsed))]
+sample_data
+```
+
+#Boxplot 1
+```{r}
+pdf("Boxplot_1.pdf", width = 10, height = 6)
+par(mar = c(10, 4, 2, 1))
+
+boxplot(sample_data, 
+        las=2, 
+        cex.axis = 0.7,
+        cex = 0.7,
+        xlab = "Samples",
+        ylab = "Expression",
+        main = "BP #1 - RAW: Gene Expression vs. Samples")
+
+dev.off()
+```
+
+# Create sample info table by inferring group (Normal vs Cancer)
+```{r}
+sample = colnames(counts_filtered[2:length(counts_filtered)])
+sample
+
+sample_info <- data.frame(sample, sample)
+
+sample_info
+colnames(sample_info) <- c("samples", "group")
+
+sample_info$group[1:28] <- "adjacent"
+sample_info$group[29:56] <- "cancer"
+
+sample_info
+```
+
+#Create DGEList
+```{r}
+all_cds <- DGEList(sample_data, group = sample_info$group, genes = df_collapsed[, 1:3])
+
+names(all_cds)
+dim(all_cds)
+
+all_cds
+
+
+```
+#Normalization
+```{r}
+cf_all <- calcNormFactors(all_cds, method = "TMM")
+cf_all
+
+CPM <- edgeR::cpm(cf_all)
+```
+
+#Boxplot 2
+```{r}
+pdf("Boxplot_2.pdf", width = 10, height = 6)
+par(mar = c(10, 4, 2, 1))
+boxplot(CPM, 
+        las=2, 
+        cex.axis = 0.7,
+        cex = 0.7,
+        xlab = "Samples",
+        ylab = "Expression",
+        main = "BP #2 - TMM: Gene Expression vs. Samples")
+
+dev.off()
+```
+#Transformation
+```{r}
+log2CPM <- log2(CPM + 1)
+```
+
+#Boxplot 3
+```{r}
+pdf("Boxplot_3.pdf", width = 10, height = 6)
+par(mar = c(10, 4, 2, 1))
+boxplot(log2CPM, 
+        las=2, 
+        cex.axis = 0.7,
+        cex = 0.7,
+        xlab = "Samples",
+        ylab = "log2(cpm + 1)",
+        main = "BP #3 - Transformed: Gene Expression vs. Samples")
+
+dev.off()
+
+```
+#export processed data
+```{r}
+rownames(log2CPM)
+log2CPM_df <- as.data.frame(log2CPM)
+log2CPM_df$gene_name <- rownames(log2CPM_df)
+
+norm_transform <- merge(df_collapsed[, 1:3], log2CPM_df, by = "gene_name")
+norm_transform
+
+```
+
+```{r}
+write.csv(norm_transform, file = "Normalized_Transformed_GSE268175.csv")
+```
+
+
+
+#PCA plotting
+```{r}
+par(bty = 'n')
+FCpca <- prcomp(t(log2CPM)) ## compute principal components
+
+head(FCpca$x)
+```
+
+#PCA plotting
+```{r}
+pcaValues <- data.frame(FCpca$x[, 1:2])
+head(pcaValues)
+
+#add group column
+pcaValues$group <- sample_info$group
+pcaValues$samples <- sample_info$samples
+
+head(pcaValues)
+
+PCA <- ggplot(pcaValues, aes(PC1, PC2, color = group)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1")) +
+  ylab(paste0("PC2")) +
+  coord_fixed() +
+  scale_color_manual(values = c("blue", "red")) +
+  ggtitle("PCA plot of lung cancer vs. adjacent non-cancerous tissue ") +
+  #geom_text(aes(label=samples),hjust=0.5, vjust=2, size = 3)+
+  theme(plot.title = element_text(size = 10))
+
+PCA
+
+ggsave("PCA_plot.pdf", plot = PCA, width = 8, height = 6)
+
+dev.off()
+
+```
+
+
+```{r}
+cf_all <- estimateDisp(cf_all)
+```
+
+#Testing for DE genes
+```{r}
+#pairwise comparison between groups
+exactTest()
+cf_et <- exactTest(cf_all, pair = c("adjacent", "cancer"))
+DE <- topTags(cf_et, n = nrow(cf_et$table))$table
+head(DE)
+```
+
+```{r}
+#total num DGE at FDR < 0.05
+de1 <- decideTests(cf_et, adjust.method="BH", p.value=0.05)
+summary(de1)
+
+```
+```{r}
+#differentially expressed genes 
+de1tags12 <- rownames(cf_et)[as.logical(de1)]
+plotSmear(cf_et, de.tags=de1tags12)
+abline(h = c(-0.5, 0.5), col = "blue")
+```
+
+
+#find DE genes based on p-values 
+# up and down referring to cancer
+```{r}
+#genesList <- subset(annot, gene_id %in% counts_filtered$gene_id)
+
+genes_Up <- subset(DE, FDR<0.05 & logFC > 0.5)$gene_name
+genes_Down <- subset(DE, FDR<0.05 & logFC < -0.5)$gene_name
+
+genes_Up <- as.data.frame(genes_Up)
+genes_Down <- as.data.frame(genes_Down)
+```
+
+
+
+#save list of DE genes
+```{r}
+colnames(norm_transform)
+head(DE)
+samples_to_merge <- norm_transform[, -c(2,3)]
+
+head(samples_to_merge)
+
+DE_sample <- merge(DE, samples_to_merge, by = "gene_name")
+
+```
+
+
+
+
+```{r}
+
+genes_Up_df <- subset(DE_sample, gene_name %in% genes_Up$genes_Up)
+rownames(genes_Up_df) <- NULL
+genes_Up_df
+
+genes_Down_df <- subset(DE_sample, gene_name %in% genes_Down$genes_Down)
+rownames(genes_Down_df) <- NULL
+genes_Down_df
+```
+#create N & C mean values for up and down regulated genes
+```{r}
+# Add mean columns to genes_Up_df
+genes_Up_df <- genes_Up_df %>%
+  mutate(
+    mean_N = rowMeans(.[, 8:35], na.rm = TRUE),
+    mean_C = rowMeans(.[, 36:63], na.rm = TRUE)
+  )
+
+# Add mean columns to genes_Down_df
+genes_Down_df <- genes_Down_df %>%
+  mutate(
+    mean_N = rowMeans(.[, 8:35], na.rm = TRUE),
+    mean_C = rowMeans(.[, 36:63], na.rm = TRUE)
+  )
+
+```
+
+```{r}
+head(genes_Up_df$mean_N)
+length(genes_Up_df$mean_C)
+
+head(genes_Down_df$mean_N)
+length(genes_Down_df$mean_C)
+```
+
+
+```{r}
+sample_names <- sample_info$samples
+sample_names
+
+genes_Up_df <- genes_Up_df[, c("gene_id", "gene_name", "description", "logFC", "FDR", "mean_N", "mean_C", sample_names)]
+genes_Down_df <- genes_Down_df[, c("gene_id", "gene_name", "description", "logFC", "FDR", "mean_N", "mean_C", sample_names)]
+
+```
+```{r}
+colnames(genes_Up_df)
+colnames(genes_Down_df)
+```
+
+```{r}
+genes_Up_df <- genes_Up_df[genes_Up_df$mean_N > 1 & genes_Up_df$mean_C > 1,]
+genes_Down_df <- genes_Down_df[genes_Down_df$mean_N > 1 & genes_Down_df$mean_C > 1,]
+
+```
+
+
+```{r}
+dim(genes_Up_df)
+dim(genes_Down_df)
+```
+
+```{r}
+write.csv(genes_Up_df, file = "GSE268175_C_Up.csv")
+write.csv(genes_Down_df, file = "GSE268175_C_Down.csv")
+```
+
+
+#GO analysis
+```{r}
+#UP
+up_list <- genes_Up_df
+up_list$SYMBOL <- up_list$gene_name
+up_list_entrez <- bitr(up_list$SYMBOL, 
+                       fromType='SYMBOL', 
+                       toType='ENTREZID', 
+                       OrgDb = org.Hs.eg.db)
+head(up_list_entrez)
+
+#DOWN
+down_list <- genes_Down_df
+down_list$SYMBOL <- down_list$gene_name
+down_list_entrez <- bitr(down_list$SYMBOL, 
+                       fromType='SYMBOL', 
+                       toType='ENTREZID', 
+                       OrgDb = org.Hs.eg.db)
+head(down_list_entrez)
+
+
+dim(up_list_entrez)
+dim(down_list_entrez)
+
+#MERGED
+DE_list <- subset(DE, FDR < 0.05 & abs(logFC) > 0.5)
+dim(DE_list)
+DE_list$SYMBOL <- DE_list$gene_name
+DE_list_entrez <- bitr(down_list$SYMBOL, 
+                       fromType='SYMBOL', 
+                       toType='ENTREZID', 
+                       OrgDb = org.Hs.eg.db)
+
+head(DE_list_entrez)
+
+```
+#merge 2 tables
+```{r}
+up.listEnt<-merge(up_list,up_list_entrez,by="SYMBOL")
+head(up.listEnt)
+
+down.listEnt<-merge(down_list,down_list_entrez,by="SYMBOL")
+head(down.listEnt)
+
+DE.listEnt<-merge(DE_list,DE_list_entrez,by="SYMBOL")
+head(DE.listEnt)
+```
+
+
+```{r}
+UP.BP <- enrichGO(gene = up.listEnt$ENTREZID,
+                   OrgDb= org.Hs.eg.db,
+                   keyType = 'ENTREZID',
+                   ont = "BP",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.05,readable=T)
+
+head(UP.BP); dim(UP.BP)
+
+write.table(UP.BP, file = "GO_UP_BP.csv", sep = ",", col.names = NA, qmethod = "double")
+```
+
+```{r}
+#plot GO terms
+pdf("GO_UP_BP_barplot.pdf", width = 10, height = 8)
+UP_bp_bp<-barplot(UP.BP, showCategory=12,title = "GO:UP_BP")
+print(UP_bp_bp)
+dev.off()
+```
+
+```{r}
+#GO UP dotplot
+pdf("GO_UP_BP_dotplot.pdf", width = 10, height = 8)
+dotplot(UP.BP, showCategory=12) + ggtitle("GO:UP_BP")
+
+dev.off()
+```
+
+```{r}
+#Gene-concept network
+UP_bp_cnet <- cnetplot(UP.BP,
+         font.size = 16, 
+         showCategory = 10,
+         categorySize="p.adjust",
+         colorEdge = TRUE,
+         shadowtext=FALSE)+ 
+  ggtitle("GO:UP_BP")
+ggsave("GO_cnetplot_UP_BP.pdf", plot = UP_bp_cnet, width = 20, height = 12, units = "in")
+
+
+dev.off()
+```
+
+#Cellular component
+```{r}
+UP.CC <- enrichGO(gene = up.listEnt$ENTREZID,
+                   OrgDb= org.Hs.eg.db,
+                   keyType = 'ENTREZID',
+                   ont = "CC",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.05,readable=T)
+
+head(UP.CC); dim(UP.CC)
+write.table(UP.CC, file = "GO_UP_CC.csv", sep = ",", col.names = NA, qmethod = "double")
+```
+```{r}
+#plot GO terms
+pdf("GO_UP_CC_barplot.pdf", width = 10, height = 8)
+UP_CC_bp<-barplot(UP.CC, showCategory=12,title = "GO:UP_CC")
+print(UP_CC_bp)
+dev.off()
+```
+
+```{r}
+#GO UP CC dotplot
+pdf("GO_UP_CC_dotplot.pdf", width = 10, height = 8)
+dotplot(UP.CC, showCategory=12) + ggtitle("GO:UPCC")
+
+dev.off()
+```
+
+```{r}
+#Gene-concept network
+UP_CC_cnet <- cnetplot(UP.CC,
+         font.size = 16, 
+         showCategory = 10,
+         categorySize="p.adjust",
+         colorEdge = TRUE,
+         shadowtext=FALSE)+ 
+  ggtitle("GO:UP_CC")
+ggsave("GO_cnetplot_UP_CC.pdf", plot = UP_CC_cnet, width = 20, height = 12, units = "in")
+
+
+dev.off()
+```
+
+#molecular function
+```{r}
+UP.MF <- enrichGO(gene = up.listEnt$ENTREZID,
+                   OrgDb= org.Hs.eg.db,
+                   keyType = 'ENTREZID',
+                   ont = "MF",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.05,readable=T)
+
+head(UP.MF); dim(UP.MF)
+
+write.table(UP.MF, file = "GO_UP.MF.csv", sep = ",", col.names = NA, qmethod = "double")
+```
+```{r}
+#plot GO terms
+pdf("GO_UP_MF_barplot.pdf", width = 10, height = 8)
+UP_MF_bp<-barplot(UP.MF, showCategory=12,title = "GO:UP_MF")
+print(UP_MF_bp)
+dev.off()
+```
+
+```{r}
+#GO UP MF dotplot
+pdf("GO_UP_MF_dotplot.pdf", width = 10, height = 8)
+dotplot(UP.MF, showCategory=12) + ggtitle("GO:UP_MF")
+
+dev.off()
+```
+
+```{r}
+#Gene-concept network
+UP_MF_cnet <- cnetplot(UP.MF,
+         font.size = 16, 
+         showCategory = 10,
+         categorySize="p.adjust",
+         colorEdge = TRUE,
+         shadowtext=FALSE)+ 
+  ggtitle("GO:UP_MF")
+ggsave("GO_cnetplot_UP_MF.pdf", plot = UP_MF_cnet, width = 20, height = 12, units = "in")
+
+
+dev.off()
+
+```
+
+
+
+#DOWN BP
+```{r}
+DOWN.BP <- enrichGO(gene = down.listEnt$ENTREZID,
+                   OrgDb= org.Hs.eg.db,
+                   keyType = 'ENTREZID',
+                   ont = "BP",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.05,readable=T)
+
+head(DOWN.BP); dim(DOWN.BP)
+
+write.table(DOWN.BP, file = "GO_DOWN.BP.csv", sep = ",", col.names = NA, qmethod = "double")
+```
+```{r}
+#plot GO terms
+pdf("GO_DOWN_BP_barplot.pdf", width = 10, height = 8)
+DOWN_bp_bp<-barplot(DOWN.BP, showCategory=12,title = "GO:DOWN_BP")
+print(DOWN_bp_bp)
+dev.off()
+```
+
+```{r}
+#GO DOWN dotplot
+pdf("GO_DOWN_BP_dotplot.pdf", width = 10, height = 8)
+dotplot(DOWN.BP, showCategory=12) + ggtitle("GO:DOWN_BP")
+
+dev.off()
+```
+
+```{r}
+#Gene-concept network
+DOWN_bp_cnet <- cnetplot(DOWN.BP,
+         font.size = 16, 
+         showCategory = 10,
+         categorySize="p.adjust",
+         colorEdge = TRUE,
+         shadowtext=FALSE)+ 
+  ggtitle("GO:DOWN_BP")
+ggsave("GO_cnetplot_DOWN_BP.pdf", plot = DOWN_bp_cnet, width = 20, height = 12, units = "in")
+
+
+dev.off()
+```
+
+#DOWN Cellular component
+```{r}
+DOWN.CC <- enrichGO(gene = down.listEnt$ENTREZID,
+                   OrgDb= org.Hs.eg.db,
+                   keyType = 'ENTREZID',
+                   ont = "CC",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.05,readable=T)
+
+head(DOWN.CC); dim(DOWN.CC)
+write.table(DOWN.CC, file = "GO_DOWN_CC.csv", sep = ",", col.names = NA, qmethod = "double")
+```
+
+```{r}
+#plot GO terms
+pdf("GO_DOWN_CC_barplot.pdf", width = 10, height = 8)
+DOWN_CC_bp<-barplot(DOWN.CC, showCategory=12,title = "GO:DOWN_CC")
+print(DOWN_CC_bp)
+
+dev.off()
+```
+
+```{r}
+#GO DOWN dotplot
+pdf("GO_DOWN_CC_dotplot.pdf", width = 10, height = 8)
+dotplot(DOWN.CC, showCategory=12) + ggtitle("GO:DOWN_CC")
+
+dev.off()
+```
+
+```{r}
+#Gene-concept network
+DOWN_CC_cnet <- cnetplot(DOWN.CC,
+         font.size = 16, 
+         showCategory = 10,
+         categorySize="p.adjust",
+         colorEdge = TRUE,
+         shadowtext=FALSE)+ 
+  ggtitle("GO:DOWN_CC")
+ggsave("GO_cnetplot_DOWN_CC.pdf", plot = DOWN_CC_cnet, width = 20, height = 12, units = "in")
+
+
+dev.off()
+```
+
+
+#DOWN molecular function
+```{r}
+DOWN.MF <- enrichGO(gene = down.listEnt$ENTREZID,
+                   OrgDb= org.Hs.eg.db,
+                   keyType = 'ENTREZID',
+                   ont = "MF",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.05,readable=T)
+
+head(DOWN.MF); dim(DOWN.MF)
+
+write.table(DOWN.MF, file = "GO_DOWN_MF.csv", sep = ",", col.names = NA, qmethod = "double")
+```
+
+```{r}
+#plot GO terms
+pdf("GO_DOWN_MF_barplot.pdf", width = 10, height = 8)
+DOWN_MF_bp<-barplot(DOWN.MF, showCategory=12,title = "GO:DOWN_MF")
+print(DOWN_MF_bp)
+dev.off()
+```
+
+```{r}
+#GO DOWN dotplot
+pdf("GO_DOWN_MF_dotplot.pdf", width = 10, height = 8)
+dotplot(DOWN.MF, showCategory=12) + ggtitle("GO:DOWN_MF")
+
+dev.off()
+```
+
+```{r}
+#Gene-concept network
+DOWN_MF_cnet <- cnetplot(DOWN.MF,
+         font.size = 16, 
+         showCategory = 10,
+         categorySize="p.adjust",
+         colorEdge = TRUE,
+         shadowtext=FALSE)+ 
+  ggtitle("GO:DOWN_MF")
+ggsave("GO_cnetplot_DOWN_MF.pdf", plot = DOWN_MF_cnet, width = 20, height = 12, units = "in")
+
+
+dev.off()
+```
+
+
+
+
+#ALL
+```{r}
+DE.BP <- enrichGO(gene = DE.listEnt$ENTREZID,
+                   OrgDb= org.Hs.eg.db,
+                   keyType = 'ENTREZID',
+                   ont = "BP",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.05,readable=T)
+
+head(DE.BP); dim(DE.BP)
+
+write.table(DE.BP, file = "GO_DE.BP.csv", sep = ",", col.names = NA, qmethod = "double")
+```
+
+```{r}
+#plot GO terms
+pdf("GO_DE_BP_barplot.pdf", width = 10, height = 8)
+DE_bp_bp<-barplot(DE.BP, showCategory=12,title = "GO:DE_BP")
+print(DE_bp_bp)
+dev.off()
+```
+
+```{r}
+#GO dotplot
+pdf("GO_DE_BP_dotplot.pdf", width = 10, height = 8)
+dotplot(DE.BP,showCategory=12) + ggtitle("GO:DE_BP")
+
+dev.off()
+```
+
+```{r}
+#Gene-concept network
+DE_bp_cnet <- cnetplot(DE.BP,
+         font.size = 16, 
+         showCategory = 10,
+         categorySize="p.adjust",
+         colorEdge = TRUE,
+         shadowtext=FALSE)+ 
+  ggtitle("GO:DE_BP")
+ggsave("GO_cnetplot_DE_BP.pdf", plot = DE_bp_cnet, width = 20, height = 12, units = "in")
+
+
+dev.off()
+```
+
+
+#Cellular component
+```{r}
+DE.CC <- enrichGO(gene = DE.listEnt$ENTREZID,
+                   OrgDb= org.Hs.eg.db,
+                   keyType = 'ENTREZID',
+                   ont = "CC",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.05,readable=T)
+
+head(DE.CC); dim(DE.CC)
+write.table(DE.CC, file = "GO_DE_DE.CC.csv", sep = ",", col.names = NA, qmethod = "double")
+```
+
+
+```{r}
+pdf("GO_DE_CC_barplot.pdf", width = 10, height = 8)
+DE_cc_bp <- barplot(DE.CC, showCategory=12,title = "GO_DE:CC")
+print(DE_cc_bp)
+
+dev.off()
+```
+
+```{r}
+#GO dotplot
+pdf("GO_DE_CC_dotplot.pdf", width = 10, height = 8)
+dotplot(DE.CC,showCategory=12) + ggtitle("GO:DE_CC")
+
+dev.off()
+```
+
+
+```{r}
+DE_cc_cnet <- cnetplot(DE.CC, font.size = 16, showCategory = 10,categorySize="p.adjust",colorEdge = TRUE,shadowtext="none")+ ggtitle("GO_DE:CC")
+ggsave("GO_cnetplot_DE_CC.pdf", plot = DE_cc_cnet, width = 20, height = 12, units = "in")
+```
+
+
+#molecular function
+```{r}
+DE.MF <- enrichGO(gene = DE.listEnt$ENTREZID,
+                   OrgDb= org.Hs.eg.db,
+                   keyType = 'ENTREZID',
+                   ont = "MF",
+                   pAdjustMethod = "fdr",
+                   pvalueCutoff  = 0.05,
+                   qvalueCutoff  = 0.05,readable=T)
+
+head(DE.MF); dim(DE.MF)
+
+write.table(DE.MF, file = "GO_DE.MF.csv", sep = ",", col.names = NA, qmethod = "double")
+```
+
+
+```{r}
+pdf("GO_DE_MF_barplot.pdf", width = 10, height = 8)
+barplot(DE.MF, showCategory=12,title = "GO:DE_MF")
+
+dev.off()
+```
+
+```{r}
+#GO dotplot
+pdf("GO_DE_MF_dotplot.pdf", width = 10, height = 8)
+dotplot(DE.MF, showCategory=12) + ggtitle("GO:DE_MF")
+
+dev.off()
+```
+
+
+```{r}
+DE_mf_cnet <- cnetplot(DE.MF, font.size = 16, showCategory = 10,categorySize="p.adjust",colorEdge = TRUE,shadowtext="none")+ ggtitle("GO:DE_MF")
+ggsave("GO_cnetplot_DE_MF.pdf", plot = DE_mf_cnet, width = 20, height = 12, units = "in")
+
+dev.off()
+```
+
+
+```{r}
+DE_volcano <- DE
+DE_volcano$Threshold <- "NO"
+DE_volcano$Threshold[DE_volcano$logFC > 0.5 & DE_volcano$FDR < 0.05] <- "UP"
+DE_volcano$Threshold[DE_volcano$logFC < -0.5 & DE_volcano$FDR < 0.05] <- "DOWN"
+
+table(DE_volcano$Threshold)
+
+
+```
+
+#Volcano plot
+```{r}
+volcano_plot <- ggplot(data = DE_volcano, aes(x = logFC, y = -log10(FDR), col = Threshold)) +
+  geom_vline(xintercept = c(-0.5, 0.5), col = "gray", linetype = 'dashed') +
+  geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') +
+         geom_point(size = 4)+
+  scale_color_manual(values = c("blue", "grey", "red"),
+                     labels = c("LC Down", "Not significant", "LC Up"))+
+  ggtitle("Lung cancer vs. adjacent tissue volcano plot")+
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 11)
+  )
+pdf(file = "GSE268175_volcano_plot.pdf", width = 8, height = 12)
+volcano_plot
+
+dev.off()
+
+```
+
+```{r}
+mypal <- colorRampPalette(c("blue", "yellow", "red"))
+```
+
+
+#UP heatmap
+```{r}
+rownames(genes_Up_df) <- genes_Up_df$gene_name
+
+top30_up <- genes_Up_df[order(-genes_Up_df$logFC),][1:30, ]
+top30_up
+
+
+colnames(top30_up)
+numeric_up <- top30_up[, 8:63]
+up_with_gap_matrix <- as.matrix(numeric_up)
+
+pdf("up_C_heatmap.pdf", width = 16, height = 8)
+pheatmap(up_with_gap_matrix,
+         fontsize = 9,
+         scale = "row",
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         gaps_col = 28,
+         color = mypal,
+         main = "Top-30 Upregulated genes (C)")
+dev.off()
+
+pdf("up_C_heatmap_2.pdf", width = 16, height = 8)
+heatmap.2(up_with_gap_matrix,
+          labRow = rownames(up_with_gap_matrix),
+          key = F,trace = "none",symkey = F,symbreaks = F,
+          Colv = FALSE,
+          breaks = seq(-1.5, +1.5, 0.1),
+          col = mypal(30),
+          colsep = 28,
+          Rowv = TRUE, scale = "row", dendrogram = "row",
+          cexCol = 1, cexRow = 1,
+          margin = c(12,15),
+          main = "Top-30 Upregulated genes (C)")
+
+```
+
+#DOWN heatmap
+```{r}
+rownames(genes_Down_df) <- genes_Down_df$gene_name
+
+top30_down <- genes_Down_df[order(genes_Down_df$logFC),][1:30, ]
+top30_down
+
+
+colnames(top30_down)
+numeric_down <- top30_down[, 8:63]
+down_with_gap_matrix <- as.matrix(numeric_down)
+
+pdf("down_C_heatmap.pdf", width = 16, height = 8)
+pheatmap(down_with_gap_matrix,
+         fontsize = 9,
+         scale = "row",
+         cluster_cols = FALSE,
+         cluster_rows = FALSE,
+         gaps_col = 28,
+         color = mypal(20),
+         main = "Top-30 Downregulated genes (C)")
+dev.off()
+
+pdf("down_C_heatmap_2.pdf", width = 16, height = 8)
+heatmap.2(down_with_gap_matrix,
+          labRow = rownames(down_with_gap_matrix),
+          key = T,trace = "none",symkey = F,symbreaks = F,
+          Colv = FALSE,
+          breaks = seq(-1.5, +1.5, 0.1),
+          col = mypal(30),
+          colsep = 28,
+          Rowv = TRUE, scale = "row", dendrogram = "row",
+          cexCol = 1, cexRow = 1,
+          margin = c(12,15),
+          main = "Top-30 Downregulated genes (C)")
+```
+
+
+```
+
+
+
+
