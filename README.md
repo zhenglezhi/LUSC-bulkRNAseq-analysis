@@ -27,7 +27,6 @@ This repository contains R scripts for differential gene expression and pathway 
 ## Repository Structure
 scripts/     R analysis scripts  
 figures/     Output plots  
-data/        Input data
 README.md
 
 ## Outputs
